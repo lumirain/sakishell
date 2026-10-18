@@ -1,0 +1,171 @@
+name: Build Installers
+
+# 触发：手动运行，或推送 v* 标签（如 v1.0.0）
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  VERSION: 1.0.0
+
+jobs:
+  # ============ Windows：NSIS 安装包（含卸载程序） ============
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set npm registry (CN mirror)
+        run: npm config set registry https://registry.npmmirror.com
+        shell: bash
+
+      - name: Install frontend deps
+        run: npm ci || npm install
+        working-directory: frontend
+
+      - name: Generate app icons
+        run: python3 scripts/gen_icon.py
+        shell: bash
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
+        shell: bash
+        env:
+          GOPROXY: https://goproxy.cn,direct
+
+      - name: Build NSIS installer
+        run: wails build -platform windows/amd64 -nsis -clean
+        shell: bash
+        env:
+          GOPROXY: https://goproxy.cn,direct
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: sakishell-windows
+          path: |
+            build/bin/*.exe
+            build/bin/*setup*.exe
+
+  # ============ Linux：deb + AppImage ============
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libayatana-appindicator3-dev librsvg2-dev dpkg-dev
+        env:
+          DEBIAN_FRONTEND: noninteractive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Set npm registry (CN mirror)
+        run: npm config set registry https://registry.npmmirror.com
+
+      - name: Generate app icons
+        run: python3 scripts/gen_icon.py
+
+      - name: Install frontend deps
+        run: npm ci || npm install
+        working-directory: frontend
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
+        env:
+          GOPROXY: https://goproxy.cn,direct
+
+      - name: Build Linux binary
+        run: wails build -platform linux/amd64 -clean
+        env:
+          GOPROXY: https://goproxy.cn,direct
+
+      - name: Package .deb
+        run: |
+          VERSION=${{ env.VERSION }}
+          mkdir -p pkg/usr/bin pkg/DEBIAN pkg/usr/share/applications pkg/usr/share/icons/hicolor/256x256/apps
+          cp build/bin/sakishell pkg/usr/bin/sakishell
+          cat > pkg/DEBIAN/control <<EOF
+          Package: sakishell
+          Version: ${VERSION}
+          Architecture: amd64
+          Maintainer: SakiShell <noreply@example.com>
+          Depends: libgtk-3-0, libwebkit2gtk-4.0-0, libayatana-appindicator3-1, libsoup2.4-1
+          Description: SakiShell - SSH terminal with MCP server for AI clients
+          EOF
+          cat > pkg/usr/share/applications/sakishell.desktop <<EOF
+          [Desktop Entry]
+          Name=SakiShell
+          Comment=SSH terminal with MCP server
+          Exec=/usr/bin/sakishell
+          Terminal=false
+          Type=Application
+          Categories=Network;TerminalEmulator;
+          Icon=sakishell
+          EOF
+          # 桌面图标使用生成的应用图标
+          cp build/appicon.png pkg/usr/share/icons/hicolor/256x256/apps/sakishell.png
+          chmod 755 pkg/usr/bin/sakishell
+          dpkg-deb --build --root-owner-group pkg sakishell_${VERSION}_amd64.deb
+
+      - name: Package AppImage (best effort)
+        continue-on-error: true
+        run: |
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy
+          chmod +x linuxdeploy
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp build/bin/sakishell AppDir/usr/bin/
+          cp pkg/usr/share/applications/sakishell.desktop AppDir/usr/share/applications/ 2>/dev/null || true
+          cp pkg/usr/share/icons/hicolor/256x256/apps/sakishell.png AppDir/usr/share/icons/hicolor/256x256/apps/ 2>/dev/null || true
+          printf '[Desktop Entry]\nName=SakiShell\nExec=sakishell\nType=Application\nIcon=sakishell\nCategories=Network;\n' > AppDir/sakishell.desktop
+          ./linuxdeploy --appdir AppDir --output appimage
+          mv *.AppImage sakishell_${{ env.VERSION }}_x86_64.AppImage 2>/dev/null || true
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: sakishell-linux
+          path: |
+            *.deb
+            *.AppImage
+
+  # ============ 发布到 GitHub Release（打 tag 时） ============
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
