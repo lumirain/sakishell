@@ -1,0 +1,8 @@
+build/bin
+node_modules
+frontend/dist
+frontend/wailsjs
+*.deb
+*.AppImage
+pkg/
+build/windows/installer/
