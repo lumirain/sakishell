@@ -10,6 +10,7 @@
 """
 import os
 import struct
+import tempfile
 import zlib
 
 SIZE = 512
@@ -133,9 +134,14 @@ def main():
     # ICO 使用 256x256 降采样 PNG（Windows 标准最大 256）
     ico_px = downsample(px, SIZE, 256)
     ico_path = os.path.join(win, 'icon.ico')
-    write_png('/tmp/saki_ico_256.png', ico_px, 256)
-    with open('/tmp/saki_ico_256.png', 'rb') as f:
+    tmp_png = os.path.join(tempfile.gettempdir(), 'saki_ico_256.png')
+    write_png(tmp_png, ico_px, 256)
+    with open(tmp_png, 'rb') as f:
         png256 = f.read()
+    try:
+        os.remove(tmp_png)
+    except OSError:
+        pass
     with open(ico_path, 'wb') as f:
         f.write(b'\x00\x00\x01\x00\x01\x00' + struct.pack('<BBBBHHII', 0, 0, 0, 0, 1, 32, len(png256), 22) + png256)
     print('generated:', png_path, os.path.getsize(png_path), 'bytes')
